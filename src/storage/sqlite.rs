@@ -2064,16 +2064,15 @@ impl SqliteStorage {
     /// Returns an error if the database update fails.
     pub fn remove_all_labels(&mut self, issue_id: &str, actor: &str) -> Result<usize> {
         self.mutate("remove_all_labels", actor, |conn, ctx| {
-            let rows = tx.execute(
+            let rows = conn.execute_with_params(
                 "DELETE FROM labels WHERE issue_id = ?",
-                rusqlite::params![issue_id],
+                &[SqliteValue::from(issue_id)],
             )?;
 
             if rows > 0 {
-                // Bump updated_at
-                tx.execute(
+                conn.execute_with_params(
                     "UPDATE issues SET updated_at = ? WHERE id = ?",
-                    rusqlite::params![Utc::now().to_rfc3339(), issue_id],
+                    &[SqliteValue::from(Utc::now().to_rfc3339()), SqliteValue::from(issue_id)],
                 )?;
 
                 ctx.record_event(
@@ -2095,18 +2094,24 @@ impl SqliteStorage {
     /// Returns an error if the database update fails.
     pub fn set_labels(&mut self, issue_id: &str, labels: &[String], actor: &str) -> Result<()> {
         self.mutate("set_labels", actor, |conn, ctx| {
-            let mut stmt = tx.prepare("SELECT label FROM labels WHERE issue_id = ?")?;
-            let old_labels: Vec<String> = stmt
-                .query_map([issue_id], |row| row.get(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            drop(stmt);
+            let old_rows = conn.query_with_params(
+                "SELECT label FROM labels WHERE issue_id = ?",
+                &[SqliteValue::from(issue_id)],
+            )?;
+            let old_labels: Vec<String> = old_rows
+                .iter()
+                .filter_map(|r| r.get(0).and_then(SqliteValue::as_text).map(String::from))
+                .collect();
 
-            tx.execute("DELETE FROM labels WHERE issue_id = ?", [issue_id])?;
+            conn.execute_with_params(
+                "DELETE FROM labels WHERE issue_id = ?",
+                &[SqliteValue::from(issue_id)],
+            )?;
 
             for label in labels {
-                tx.execute(
+                conn.execute_with_params(
                     "INSERT INTO labels (issue_id, label) VALUES (?, ?)",
-                    rusqlite::params![issue_id, label],
+                    &[SqliteValue::from(issue_id), SqliteValue::from(label.as_str())],
                 )?;
             }
 
@@ -2143,10 +2148,9 @@ impl SqliteStorage {
                 );
                 ctx.mark_dirty(issue_id);
 
-                // Bump updated_at
-                tx.execute(
+                conn.execute_with_params(
                     "UPDATE issues SET updated_at = ? WHERE id = ?",
-                    rusqlite::params![Utc::now().to_rfc3339(), issue_id],
+                    &[SqliteValue::from(Utc::now().to_rfc3339()), SqliteValue::from(issue_id)],
                 )?;
             }
 
@@ -2160,13 +2164,14 @@ impl SqliteStorage {
     ///
     /// Returns an error if the database query fails.
     pub fn get_labels(&self, issue_id: &str) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT label FROM labels WHERE issue_id = ? ORDER BY label")?;
-        let labels = stmt
-            .query_map([issue_id], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(labels)
+        let rows = self.conn.query_with_params(
+            "SELECT label FROM labels WHERE issue_id = ? ORDER BY label",
+            &[SqliteValue::from(issue_id)],
+        )?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| r.get(0).and_then(SqliteValue::as_text).map(String::from))
+            .collect())
     }
 
     /// Get labels for multiple issues efficiently.
@@ -2194,16 +2199,13 @@ impl SqliteStorage {
                 placeholders.join(",")
             );
 
-            let params: Vec<&dyn rusqlite::ToSql> =
-                chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            let params: Vec<SqliteValue> =
+                chunk.iter().map(|s| SqliteValue::from(s.as_str())).collect();
 
-            let mut stmt = self.conn.prepare(&sql)?;
-            let rows = stmt.query_map(params.as_slice(), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-
-            for row in rows {
-                let (issue_id, label) = row?;
+            let rows = self.conn.query_with_params(&sql, &params)?;
+            for row in &rows {
+                let issue_id = row.get(0).and_then(SqliteValue::as_text).unwrap_or("").to_string();
+                let label = row.get(1).and_then(SqliteValue::as_text).unwrap_or("").to_string();
                 map.entry(issue_id).or_default().push(label);
             }
         }
@@ -2219,16 +2221,14 @@ impl SqliteStorage {
     ///
     /// Returns an error if the database query fails.
     pub fn get_all_labels(&self) -> Result<HashMap<String, Vec<String>>> {
-        let mut stmt = self
+        let rows = self
             .conn
-            .prepare("SELECT issue_id, label FROM labels ORDER BY issue_id, label")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
+            .query("SELECT issue_id, label FROM labels ORDER BY issue_id, label")?;
 
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
-        for row in rows {
-            let (issue_id, label) = row?;
+        for row in &rows {
+            let issue_id = row.get(0).and_then(SqliteValue::as_text).unwrap_or("").to_string();
+            let label = row.get(1).and_then(SqliteValue::as_text).unwrap_or("").to_string();
             map.entry(issue_id).or_default().push(label);
         }
         Ok(map)
@@ -2243,7 +2243,7 @@ impl SqliteStorage {
     ///
     /// Returns an error if the database query fails.
     pub fn get_unique_labels_with_counts(&self) -> Result<Vec<(String, i64)>> {
-        let mut stmt = self.conn.prepare(
+        let rows = self.conn.query(
             r"SELECT l.label, COUNT(*) as count
               FROM labels l
               JOIN issues i ON l.issue_id = i.id
@@ -2251,12 +2251,14 @@ impl SqliteStorage {
               GROUP BY l.label
               ORDER BY l.label",
         )?;
-        let results = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(results)
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let label = r.get(0).and_then(SqliteValue::as_text)?.to_string();
+                let count = r.get(1).and_then(SqliteValue::as_integer)?;
+                Some((label, count))
+            })
+            .collect())
     }
 
     /// Rename a label across all issues.
@@ -2268,37 +2270,37 @@ impl SqliteStorage {
     /// Returns an error if the database update fails.
     pub fn rename_label(&mut self, old_name: &str, new_name: &str, actor: &str) -> Result<usize> {
         self.mutate("rename_label", actor, |conn, ctx| {
-            // Get all issue IDs that have the old label
-            let mut stmt = tx.prepare("SELECT issue_id FROM labels WHERE label = ?")?;
-            let issue_ids: Vec<String> = stmt
-                .query_map([old_name], |row| row.get(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            drop(stmt);
+            let id_rows = conn.query_with_params(
+                "SELECT issue_id FROM labels WHERE label = ?",
+                &[SqliteValue::from(old_name)],
+            )?;
+            let issue_ids: Vec<String> = id_rows
+                .iter()
+                .filter_map(|r| r.get(0).and_then(SqliteValue::as_text).map(String::from))
+                .collect();
 
-            // Check if any issues already have the new label (would cause duplicates)
-            let mut check_stmt =
-                tx.prepare("SELECT issue_id FROM labels WHERE label = ? AND issue_id IN (SELECT issue_id FROM labels WHERE label = ?)")?;
-            let conflicts: Vec<String> = check_stmt
-                .query_map(rusqlite::params![new_name, old_name], |row| row.get(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            drop(check_stmt);
+            let conflict_rows = conn.query_with_params(
+                "SELECT issue_id FROM labels WHERE label = ? AND issue_id IN (SELECT issue_id FROM labels WHERE label = ?)",
+                &[SqliteValue::from(new_name), SqliteValue::from(old_name)],
+            )?;
+            let conflicts: Vec<String> = conflict_rows
+                .iter()
+                .filter_map(|r| r.get(0).and_then(SqliteValue::as_text).map(String::from))
+                .collect();
 
-            // For issues that already have the new label, just remove the old one
             for conflict_id in &conflicts {
-                tx.execute(
+                conn.execute_with_params(
                     "DELETE FROM labels WHERE issue_id = ? AND label = ?",
-                    rusqlite::params![conflict_id, old_name],
+                    &[SqliteValue::from(conflict_id.as_str()), SqliteValue::from(old_name)],
                 )?;
                 ctx.mark_dirty(conflict_id);
             }
 
-            // Rename the label for issues that don't have conflicts
-            let renamed = tx.execute(
+            let renamed = conn.execute_with_params(
                 "UPDATE labels SET label = ? WHERE label = ?",
-                rusqlite::params![new_name, old_name],
+                &[SqliteValue::from(new_name), SqliteValue::from(old_name)],
             )?;
 
-            // Mark all affected issues as dirty and record events
             let now = Utc::now().to_rfc3339();
             for issue_id in &issue_ids {
                 ctx.record_event(
@@ -2308,10 +2310,9 @@ impl SqliteStorage {
                 );
                 ctx.mark_dirty(issue_id);
 
-                // Update timestamp
-                tx.execute(
+                conn.execute_with_params(
                     "UPDATE issues SET updated_at = ? WHERE id = ?",
-                    rusqlite::params![now, issue_id],
+                    &[SqliteValue::from(now.as_str()), SqliteValue::from(issue_id.as_str())],
                 )?;
             }
 
@@ -2325,24 +2326,26 @@ impl SqliteStorage {
     ///
     /// Returns an error if the database query fails.
     pub fn get_comments(&self, issue_id: &str) -> Result<Vec<Comment>> {
-        let mut stmt = self.conn.prepare(
+        let rows = self.conn.query_with_params(
             "SELECT id, issue_id, author, text, created_at
              FROM comments
              WHERE issue_id = ?
              ORDER BY created_at ASC",
+            &[SqliteValue::from(issue_id)],
         )?;
 
-        let comments = stmt
-            .query_map([issue_id], |row| {
-                Ok(Comment {
-                    id: row.get(0)?,
-                    issue_id: row.get(1)?,
-                    author: row.get(2)?,
-                    body: row.get(3)?,
-                    created_at: parse_datetime(&row.get::<_, String>(4)?)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut comments = Vec::new();
+        for row in &rows {
+            comments.push(Comment {
+                id: row.get(0).and_then(SqliteValue::as_integer).unwrap_or(0),
+                issue_id: row.get(1).and_then(SqliteValue::as_text).unwrap_or("").to_string(),
+                author: row.get(2).and_then(SqliteValue::as_text).unwrap_or("").to_string(),
+                body: row.get(3).and_then(SqliteValue::as_text).unwrap_or("").to_string(),
+                created_at: parse_datetime(
+                    row.get(4).and_then(SqliteValue::as_text).unwrap_or(""),
+                )?,
+            });
+        }
 
         Ok(comments)
     }
@@ -2354,17 +2357,17 @@ impl SqliteStorage {
     /// Returns an error if the database update fails.
     pub fn add_comment(&mut self, issue_id: &str, author: &str, text: &str) -> Result<Comment> {
         self.mutate("add_comment", author, |conn, ctx| {
-            let comment_id = insert_comment_row(tx, issue_id, author, text)?;
+            let comment_id = insert_comment_row(conn, issue_id, author, text)?;
 
-            tx.execute(
+            conn.execute_with_params(
                 "UPDATE issues SET updated_at = ? WHERE id = ?",
-                rusqlite::params![Utc::now().to_rfc3339(), issue_id],
+                &[SqliteValue::from(Utc::now().to_rfc3339()), SqliteValue::from(issue_id)],
             )?;
 
             ctx.record_event(EventType::Commented, issue_id, Some(text.to_string()));
             ctx.mark_dirty(issue_id);
 
-            fetch_comment(tx, comment_id)
+            fetch_comment(conn, comment_id)
         })
     }
 
@@ -2377,29 +2380,35 @@ impl SqliteStorage {
         &self,
         issue_id: &str,
     ) -> Result<Vec<IssueWithDependencyMetadata>> {
-        let mut stmt = self.conn.prepare(
+        let rows = self.conn.query_with_params(
             "SELECT d.depends_on_id, i.title, i.status, i.priority, d.type
              FROM dependencies d
              LEFT JOIN issues i ON d.depends_on_id = i.id
              WHERE d.issue_id = ?
              ORDER BY i.priority ASC, i.created_at DESC",
+            &[SqliteValue::from(issue_id)],
         )?;
 
-        let deps = stmt
-            .query_map([issue_id], |row| {
-                Ok(IssueWithDependencyMetadata {
-                    id: row.get::<_, String>(0)?,
-                    title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                    status: parse_status(row.get::<_, Option<String>>(2)?.as_deref()),
-                    priority: Priority(row.get::<_, Option<i32>>(3)?.unwrap_or(2)),
+        Ok(rows
+            .iter()
+            .map(|row| {
+                IssueWithDependencyMetadata {
+                    id: row.get(0).and_then(SqliteValue::as_text).unwrap_or("").to_string(),
+                    title: row.get(1).and_then(SqliteValue::as_text).unwrap_or("").to_string(),
+                    status: parse_status(row.get(2).and_then(SqliteValue::as_text)),
+                    priority: Priority(
+                        row.get(3)
+                            .and_then(SqliteValue::as_integer)
+                            .unwrap_or(2) as i32,
+                    ),
                     dep_type: row
-                        .get::<_, Option<String>>(4)?
-                        .unwrap_or_else(|| "blocks".to_string()),
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(deps)
+                        .get(4)
+                        .and_then(SqliteValue::as_text)
+                        .unwrap_or("blocks")
+                        .to_string(),
+                }
+            })
+            .collect())
     }
 
     /// Get dependents with metadata.
@@ -2411,29 +2420,35 @@ impl SqliteStorage {
         &self,
         issue_id: &str,
     ) -> Result<Vec<IssueWithDependencyMetadata>> {
-        let mut stmt = self.conn.prepare(
+        let rows = self.conn.query_with_params(
             "SELECT d.issue_id, i.title, i.status, i.priority, d.type
              FROM dependencies d
              LEFT JOIN issues i ON d.issue_id = i.id
              WHERE d.depends_on_id = ?
              ORDER BY i.priority ASC, i.created_at DESC",
+            &[SqliteValue::from(issue_id)],
         )?;
 
-        let deps = stmt
-            .query_map([issue_id], |row| {
-                Ok(IssueWithDependencyMetadata {
-                    id: row.get(0)?,
-                    title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                    status: parse_status(row.get::<_, Option<String>>(2)?.as_deref()),
-                    priority: Priority(row.get::<_, Option<i32>>(3)?.unwrap_or(2)),
+        Ok(rows
+            .iter()
+            .map(|row| {
+                IssueWithDependencyMetadata {
+                    id: row.get(0).and_then(SqliteValue::as_text).unwrap_or("").to_string(),
+                    title: row.get(1).and_then(SqliteValue::as_text).unwrap_or("").to_string(),
+                    status: parse_status(row.get(2).and_then(SqliteValue::as_text)),
+                    priority: Priority(
+                        row.get(3)
+                            .and_then(SqliteValue::as_integer)
+                            .unwrap_or(2) as i32,
+                    ),
                     dep_type: row
-                        .get::<_, Option<String>>(4)?
-                        .unwrap_or_else(|| "blocks".to_string()),
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(deps)
+                        .get(4)
+                        .and_then(SqliteValue::as_text)
+                        .unwrap_or("blocks")
+                        .to_string(),
+                }
+            })
+            .collect())
     }
 
     /// Get parent issue ID.
@@ -2442,15 +2457,12 @@ impl SqliteStorage {
     ///
     /// Returns an error if the database query fails.
     pub fn get_parent_id(&self, issue_id: &str) -> Result<Option<String>> {
-        let result = self.conn.query_row(
+        match self.conn.query_row_with_params(
             "SELECT depends_on_id FROM dependencies WHERE issue_id = ? AND type = 'parent-child'",
-            [issue_id],
-            |row| row.get(0),
-        );
-
-        match result {
-            Ok(parent_id) => Ok(Some(parent_id)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            &[SqliteValue::from(issue_id)],
+        ) {
+            Ok(row) => Ok(row.get(0).and_then(SqliteValue::as_text).map(String::from)),
+            Err(fsqlite_error::FrankenError::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
@@ -2461,13 +2473,14 @@ impl SqliteStorage {
     ///
     /// Returns an error if the database query fails.
     pub fn get_dependents(&self, issue_id: &str) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT issue_id FROM dependencies WHERE depends_on_id = ?")?;
-        let ids = stmt
-            .query_map([issue_id], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(ids)
+        let rows = self.conn.query_with_params(
+            "SELECT issue_id FROM dependencies WHERE depends_on_id = ?",
+            &[SqliteValue::from(issue_id)],
+        )?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| r.get(0).and_then(SqliteValue::as_text).map(String::from))
+            .collect())
     }
 
     /// Get IDs of issues that this one depends on.
@@ -2476,13 +2489,14 @@ impl SqliteStorage {
     ///
     /// Returns an error if the database query fails.
     pub fn get_dependencies(&self, issue_id: &str) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT depends_on_id FROM dependencies WHERE issue_id = ?")?;
-        let ids = stmt
-            .query_map([issue_id], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(ids)
+        let rows = self.conn.query_with_params(
+            "SELECT depends_on_id FROM dependencies WHERE issue_id = ?",
+            &[SqliteValue::from(issue_id)],
+        )?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| r.get(0).and_then(SqliteValue::as_text).map(String::from))
+            .collect())
     }
 
     /// Count how many dependencies an issue has.
@@ -2490,14 +2504,13 @@ impl SqliteStorage {
     /// # Errors
     ///
     /// Returns an error if the database query fails.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn count_dependencies(&self, issue_id: &str) -> Result<usize> {
-        let count: i64 = self.conn.query_row(
+        let row = self.conn.query_row_with_params(
             "SELECT count(*) FROM dependencies WHERE issue_id = ?",
-            [issue_id],
-            |row| row.get(0),
+            &[SqliteValue::from(issue_id)],
         )?;
-        // count is always non-negative from COUNT(*), safe to cast
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let count = row.get(0).and_then(SqliteValue::as_integer).unwrap_or(0);
         Ok(count as usize)
     }
 
@@ -2506,14 +2519,13 @@ impl SqliteStorage {
     /// # Errors
     ///
     /// Returns an error if the database query fails.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn count_dependents(&self, issue_id: &str) -> Result<usize> {
-        let count: i64 = self.conn.query_row(
+        let row = self.conn.query_row_with_params(
             "SELECT count(*) FROM dependencies WHERE depends_on_id = ?",
-            [issue_id],
-            |row| row.get(0),
+            &[SqliteValue::from(issue_id)],
         )?;
-        // count is always non-negative from COUNT(*), safe to cast
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let count = row.get(0).and_then(SqliteValue::as_integer).unwrap_or(0);
         Ok(count as usize)
     }
 
@@ -2530,12 +2542,14 @@ impl SqliteStorage {
         // Escape LIKE wildcards in parent_id to prevent injection
         let escaped_parent = escape_like_pattern(parent_id);
         let pattern = format!("{escaped_parent}.%");
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id FROM issues WHERE id LIKE ? ESCAPE '\\'")?;
-        let ids: Vec<String> = stmt
-            .query_map([&pattern], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let ids_rows = self.conn.query_with_params(
+            "SELECT id FROM issues WHERE id LIKE ? ESCAPE '\\'",
+            &[SqliteValue::from(pattern.as_str())],
+        )?;
+        let ids: Vec<String> = ids_rows
+            .iter()
+            .filter_map(|r| r.get(0).and_then(SqliteValue::as_text).map(String::from))
+            .collect();
 
         // Extract child numbers and find the maximum
         let prefix_with_dot = format!("{parent_id}.");
@@ -2581,16 +2595,13 @@ impl SqliteStorage {
                 placeholders.join(",")
             );
 
-            let params: Vec<&dyn rusqlite::ToSql> =
-                chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            let params: Vec<SqliteValue> =
+                chunk.iter().map(|s| SqliteValue::from(s.as_str())).collect();
 
-            let mut stmt = self.conn.prepare(&sql)?;
-            let rows = stmt.query_map(params.as_slice(), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })?;
-
-            for row in rows {
-                let (issue_id, count) = row?;
+            let rows = self.conn.query_with_params(&sql, &params)?;
+            for row in &rows {
+                let issue_id = row.get(0).and_then(SqliteValue::as_text).unwrap_or("").to_string();
+                let count = row.get(1).and_then(SqliteValue::as_integer).unwrap_or(0);
                 map.insert(issue_id, usize::try_from(count).unwrap_or(0));
             }
         }
@@ -2622,16 +2633,13 @@ impl SqliteStorage {
                 placeholders.join(",")
             );
 
-            let params: Vec<&dyn rusqlite::ToSql> =
-                chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            let params: Vec<SqliteValue> =
+                chunk.iter().map(|s| SqliteValue::from(s.as_str())).collect();
 
-            let mut stmt = self.conn.prepare(&sql)?;
-            let rows = stmt.query_map(params.as_slice(), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })?;
-
-            for row in rows {
-                let (issue_id, count) = row?;
+            let rows = self.conn.query_with_params(&sql, &params)?;
+            for row in &rows {
+                let issue_id = row.get(0).and_then(SqliteValue::as_text).unwrap_or("").to_string();
+                let count = row.get(1).and_then(SqliteValue::as_integer).unwrap_or(0);
                 map.insert(issue_id, usize::try_from(count).unwrap_or(0));
             }
         }
@@ -2645,13 +2653,14 @@ impl SqliteStorage {
     ///
     /// Returns an error if the database query fails.
     pub fn get_config(&self, key: &str) -> Result<Option<String>> {
-        let value = self
-            .conn
-            .query_row("SELECT value FROM config WHERE key = ?", [key], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        Ok(value)
+        match self.conn.query_row_with_params(
+            "SELECT value FROM config WHERE key = ?",
+            &[SqliteValue::from(key)],
+        ) {
+            Ok(row) => Ok(row.get(0).and_then(SqliteValue::as_text).map(String::from)),
+            Err(fsqlite_error::FrankenError::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Fetch all config values from the config table.
@@ -2660,12 +2669,12 @@ impl SqliteStorage {
     ///
     /// Returns an error if the database query fails.
     pub fn get_all_config(&self) -> Result<HashMap<String, String>> {
-        let mut stmt = self.conn.prepare("SELECT key, value FROM config")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let rows = self.conn.query("SELECT key, value FROM config")?;
 
         let mut map = HashMap::new();
-        for row in rows {
-            let (key, value) = row?;
+        for row in &rows {
+            let key = row.get(0).and_then(SqliteValue::as_text).unwrap_or("").to_string();
+            let value = row.get(1).and_then(SqliteValue::as_text).unwrap_or("").to_string();
             map.insert(key, value);
         }
         Ok(map)
