@@ -13,84 +13,80 @@ use std::path::{Path, PathBuf};
 
 /// Current version of the agent instructions blurb.
 /// Increment this when making breaking changes to the blurb format.
-pub const BLURB_VERSION: u8 = 1;
+pub const BLURB_VERSION: u8 = 2;
 
 /// Start marker for the blurb (includes version).
-pub const BLURB_START_MARKER: &str = "<!-- br-agent-instructions-v1 -->";
+pub const BLURB_START_MARKER: &str = "<!-- beads-agent-instructions-v2 -->";
 
 /// End marker for the blurb.
-pub const BLURB_END_MARKER: &str = "<!-- end-br-agent-instructions -->";
+pub const BLURB_END_MARKER: &str = "<!-- end-beads-agent-instructions -->";
 
 /// Supported agent file names in order of preference.
 pub const SUPPORTED_AGENT_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md", "agents.md", "claude.md"];
 
 /// The agent instructions blurb to append to AGENTS.md files.
-pub const AGENT_BLURB: &str = r#"<!-- br-agent-instructions-v1 -->
+pub const AGENT_BLURB: &str = r#"<!-- beads-agent-instructions-v2 -->
 
 ---
 
 ## Beads Workflow Integration
 
-This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`/`bd`) for issue tracking. Issues are stored in `.beads/` and tracked in git.
+This project uses [beads](https://github.com/steveyegge/beads) for issue tracking. Issues live in `.beads/` and are tracked in git.
 
-### Essential Commands
+Two CLIs: **bd** (issue CRUD) and **bv** (graph-aware triage, read-only).
+
+### bd: Issue Management
 
 ```bash
-# View ready issues (unblocked, not deferred)
-br ready              # or: bd ready
-
-# List and search
-br list --status=open # All open issues
-br show <id>          # Full issue details with dependencies
-br search "keyword"   # Full-text search
-
-# Create and update
-br create --title="..." --description="..." --type=task --priority=2
-br update <id> --status=in_progress
-br close <id> --reason="Completed"
-br close <id1> <id2>  # Close multiple issues at once
-
-# Sync with git
-br sync --flush-only  # Export DB to JSONL
-br sync --status      # Check sync status
+bd ready              # Unblocked issues ready to work
+bd list --status=open # All open issues
+bd show <id>          # Full details with dependencies
+bd create --title="..." --type=task --priority=2
+bd update <id> --status=in_progress
+bd close <id>         # Mark complete
+bd close <id1> <id2>  # Close multiple
+bd dep add <a> <b>    # a depends on b
+bd sync               # Sync with git
 ```
 
-### Workflow Pattern
+### bv: Graph Analysis (read-only)
 
-1. **Start**: Run `br ready` to find actionable work
-2. **Claim**: Use `br update <id> --status=in_progress`
+**NEVER run bare `bv`** — it launches interactive TUI. Always use `--robot-*` flags:
+
+```bash
+bv --robot-triage     # Ranked picks, quick wins, blockers, health
+bv --robot-next       # Single top pick + claim command
+bv --robot-plan       # Parallel execution tracks
+bv --robot-alerts     # Stale issues, cascades, mismatches
+bv --robot-insights   # Full graph metrics: PageRank, betweenness, cycles
+```
+
+### Workflow
+
+1. **Start**: `bd ready` (or `bv --robot-triage` for graph analysis)
+2. **Claim**: `bd update <id> --status=in_progress`
 3. **Work**: Implement the task
-4. **Complete**: Use `br close <id>`
-5. **Sync**: Always run `br sync --flush-only` at session end
+4. **Complete**: `bd close <id>`
+5. **Sync**: `bd sync` at session end
+
+### Session Close Protocol
+
+```bash
+git status            # Check what changed
+git add <files>       # Stage code changes
+bd sync               # Commit beads changes
+git commit -m "..."   # Commit code
+bd sync               # Commit any new beads changes
+git push              # Push to remote
+```
 
 ### Key Concepts
 
-- **Dependencies**: Issues can block other issues. `br ready` shows only unblocked work.
-- **Priority**: P0=critical, P1=high, P2=medium, P3=low, P4=backlog (use numbers 0-4, not words)
-- **Types**: task, bug, feature, epic, chore, docs, question
-- **Blocking**: `br dep add <issue> <depends-on>` to add dependencies
+- **Priority**: P0=critical, P1=high, P2=medium, P3=low, P4=backlog (numbers only)
+- **Types**: task, bug, feature, epic, question, docs
+- **Dependencies**: `bd ready` shows only unblocked work
 
-### Session Protocol
-
-**Before ending any session, run this checklist:**
-
-```bash
-git status              # Check what changed
-git add <files>         # Stage code changes
-br sync --flush-only    # Export beads changes to JSONL
-git commit -m "..."     # Commit everything
-git push                # Push to remote
-```
-
-### Best Practices
-
-- Check `br ready` at session start to find available work
-- Update status as you work (in_progress → closed)
-- Create new issues with `br create` when you discover tasks
-- Use descriptive titles and set appropriate priority/type
-- Always sync before ending session
-
-<!-- end-br-agent-instructions -->"#;
+<!-- end-beads-agent-instructions -->"#;
 
 /// Result of detecting an agent config file.
 #[derive(Debug, Clone, Default)]
@@ -132,20 +128,20 @@ impl AgentFileDetection {
     }
 }
 
-/// Check if content contains the br agent blurb.
+/// Check if content contains the beads agent blurb.
 #[must_use]
 pub fn contains_blurb(content: &str) -> bool {
-    content.contains("<!-- br-agent-instructions-v")
+    content.contains("<!-- beads-agent-instructions-v")
 }
 
-/// Check if content contains the legacy bv blurb.
+/// Check if content contains the legacy bv or br blurb.
 #[must_use]
 pub fn contains_legacy_blurb(content: &str) -> bool {
-    // Check for bv blurb markers
     content.contains("<!-- bv-agent-instructions-v")
+        || content.contains("<!-- br-agent-instructions-v")
 }
 
-/// Check if content contains any blurb (br or bv).
+/// Check if content contains any blurb (beads, br, or bv).
 #[must_use]
 pub fn contains_any_blurb(content: &str) -> bool {
     contains_blurb(content) || contains_legacy_blurb(content)
@@ -155,7 +151,7 @@ pub fn contains_any_blurb(content: &str) -> bool {
 #[must_use]
 #[allow(clippy::missing_panics_doc)] // Regex is static and valid
 pub fn get_blurb_version(content: &str) -> u8 {
-    let re = Regex::new(r"<!-- br-agent-instructions-v(\d+) -->").unwrap();
+    let re = Regex::new(r"<!-- beads-agent-instructions-v(\d+) -->").unwrap();
     if let Some(caps) = re.captures(content) {
         if let Some(m) = caps.get(1) {
             return m.as_str().parse().unwrap_or(0);
@@ -208,12 +204,12 @@ fn check_agent_file(file_path: &Path, file_type: &str) -> Option<AgentFileDetect
     };
 
     let has_legacy = contains_legacy_blurb(&content);
-    let has_br_blurb = contains_blurb(&content);
+    let has_beads_blurb = contains_blurb(&content);
 
     Some(AgentFileDetection {
         file_path: Some(file_path.to_path_buf()),
         file_type: Some(file_type.to_string()),
-        has_blurb: has_br_blurb || has_legacy,
+        has_blurb: has_beads_blurb || has_legacy,
         has_legacy_blurb: has_legacy,
         blurb_version: get_blurb_version(&content),
         content: Some(content),
@@ -256,72 +252,50 @@ pub fn append_blurb(content: &str) -> String {
     result
 }
 
-/// Remove an existing br blurb from content.
+/// Remove an existing blurb from content (handles beads-, bv-, and br- formats).
 #[must_use]
 pub fn remove_blurb(content: &str) -> String {
-    let start_marker = "<!-- br-agent-instructions-v";
-    let Some(start_idx) = content.find(start_marker) else {
-        return content.to_string();
-    };
+    let marker_pairs = [
+        ("<!-- beads-agent-instructions-v", "<!-- end-beads-agent-instructions -->"),
+        ("<!-- bv-agent-instructions-v", "<!-- end-bv-agent-instructions -->"),
+        ("<!-- br-agent-instructions-v", "<!-- end-br-agent-instructions -->"),
+    ];
 
-    let Some(end_pos) = content.find(BLURB_END_MARKER) else {
-        return content.to_string();
-    };
-    let end_idx = end_pos + BLURB_END_MARKER.len();
+    for (start_marker, end_marker) in &marker_pairs {
+        let Some(start_idx) = content.find(start_marker) else {
+            continue;
+        };
+        let Some(end_pos) = content.find(end_marker) else {
+            continue;
+        };
+        let end_idx = end_pos + end_marker.len();
 
-    // Trim whitespace around the removed section
-    let mut start = start_idx;
-    let mut end = end_idx;
+        let mut start = start_idx;
+        let mut end = end_idx;
 
-    // Remove trailing newlines
-    while end < content.len() && content[end..].starts_with('\n') {
-        end += 1;
+        while end < content.len() && content[end..].starts_with('\n') {
+            end += 1;
+        }
+
+        let mut removed_leading = 0;
+        while start > 0 && content[..start].ends_with('\n') && removed_leading < 2 {
+            start -= 1;
+            removed_leading += 1;
+        }
+
+        return format!("{}{}", &content[..start], &content[end..]);
     }
-
-    // Remove leading newlines (up to 2)
-    let mut removed_leading = 0;
-    while start > 0 && content[..start].ends_with('\n') && removed_leading < 2 {
-        start -= 1;
-        removed_leading += 1;
-    }
-
-    format!("{}{}", &content[..start], &content[end..])
+    content.to_string()
 }
 
-/// Remove legacy bv blurb from content.
+/// Remove legacy bv or br blurb from content.
 #[must_use]
 pub fn remove_legacy_blurb(content: &str) -> String {
     if !contains_legacy_blurb(content) {
         return content.to_string();
     }
-
-    let start_marker = "<!-- bv-agent-instructions-v";
-    let end_marker = "<!-- end-bv-agent-instructions -->";
-
-    let Some(start_idx) = content.find(start_marker) else {
-        return content.to_string();
-    };
-
-    let Some(end_pos) = content.find(end_marker) else {
-        return content.to_string();
-    };
-    let end_idx = end_pos + end_marker.len();
-
-    // Trim whitespace around the removed section
-    let mut start = start_idx;
-    let mut end = end_idx;
-
-    while end < content.len() && content[end..].starts_with('\n') {
-        end += 1;
-    }
-
-    let mut removed_leading = 0;
-    while start > 0 && content[..start].ends_with('\n') && removed_leading < 2 {
-        start -= 1;
-        removed_leading += 1;
-    }
-
-    format!("{}{}", &content[..start], &content[end..])
+    // remove_blurb handles bv- and br- formats since it checks all marker types
+    remove_blurb(content)
 }
 
 /// Update an existing blurb to the current version.
@@ -429,7 +403,7 @@ fn execute_check(
             work_dir.display()
         );
         println!("\nTo add beads workflow instructions:");
-        println!("  br agents --add");
+        println!("  bd agents --add");
         return Ok(());
     }
 
@@ -439,24 +413,24 @@ fn execute_check(
     println!("Found: {} at {}", file_type, file_path.display());
 
     if detection.has_legacy_blurb {
-        println!("\nStatus: Contains legacy bv blurb (needs upgrade to br format)");
+        println!("\nStatus: Contains legacy blurb (needs upgrade to beads format)");
         println!("\nTo upgrade:");
-        println!("  br agents --update");
+        println!("  bd agents --update");
     } else if detection.has_blurb {
         if detection.blurb_version < BLURB_VERSION {
             println!(
-                "\nStatus: Contains br blurb v{} (current: v{})",
+                "\nStatus: Contains beads blurb v{} (current: v{})",
                 detection.blurb_version, BLURB_VERSION
             );
             println!("\nTo update:");
-            println!("  br agents --update");
+            println!("  bd agents --update");
         } else {
-            println!("\nStatus: Contains current br blurb v{BLURB_VERSION}");
+            println!("\nStatus: Contains current beads blurb v{BLURB_VERSION}");
         }
     } else {
         println!("\nStatus: No beads workflow instructions found");
         println!("\nTo add:");
-        println!("  br agents --add");
+        println!("  bd agents --add");
     }
 
     Ok(())
@@ -670,7 +644,7 @@ fn execute_update(
     let new_content = update_blurb(content);
 
     let from_version = if detection.has_legacy_blurb {
-        "bv (legacy)".to_string()
+        "legacy (bv/br)".to_string()
     } else {
         format!("v{}", detection.blurb_version)
     };
@@ -752,27 +726,27 @@ fn render_check_rich(detection: &AgentFileDetection, work_dir: &Path, ctx: &Outp
 
         if detection.has_legacy_blurb {
             content.append_styled("\u{26A0} ", theme.warning.clone());
-            content.append("Contains legacy bv blurb (needs upgrade to br format)\n\n");
+            content.append("Contains legacy blurb (needs upgrade to beads format)\n\n");
             content.append_styled("To upgrade:\n", theme.dimmed.clone());
-            content.append_styled("  br agents --update", theme.accent.clone());
+            content.append_styled("  bd agents --update", theme.accent.clone());
         } else if detection.has_blurb {
             if detection.blurb_version < BLURB_VERSION {
                 content.append_styled("\u{26A0} ", theme.warning.clone());
                 content.append(&format!(
-                    "Contains br blurb v{} (current: v{})\n\n",
+                    "Contains beads blurb v{} (current: v{})\n\n",
                     detection.blurb_version, BLURB_VERSION
                 ));
                 content.append_styled("To update:\n", theme.dimmed.clone());
-                content.append_styled("  br agents --update", theme.accent.clone());
+                content.append_styled("  bd agents --update", theme.accent.clone());
             } else {
                 content.append_styled("\u{2713} ", theme.success.clone());
-                content.append(&format!("Contains current br blurb v{BLURB_VERSION}"));
+                content.append(&format!("Contains current beads blurb v{BLURB_VERSION}"));
             }
         } else {
             content.append_styled("\u{2717} ", theme.warning.clone());
             content.append("No beads workflow instructions found\n\n");
             content.append_styled("To add:\n", theme.dimmed.clone());
-            content.append_styled("  br agents --add", theme.accent.clone());
+            content.append_styled("  bd agents --add", theme.accent.clone());
         }
     } else {
         content.append_styled("\u{2717} ", theme.warning.clone());
@@ -783,7 +757,7 @@ fn render_check_rich(detection: &AgentFileDetection, work_dir: &Path, ctx: &Outp
             "To add beads workflow instructions:\n",
             theme.dimmed.clone(),
         );
-        content.append_styled("  br agents --add", theme.accent.clone());
+        content.append_styled("  bd agents --add", theme.accent.clone());
     }
 
     let panel = Panel::from_rich_text(&content, width)
@@ -956,23 +930,30 @@ mod tests {
 
     #[test]
     fn test_contains_blurb() {
-        let content = "Some text\n<!-- br-agent-instructions-v1 -->\nblurb\n<!-- end-br-agent-instructions -->";
+        let content = "Some text\n<!-- beads-agent-instructions-v2 -->\nblurb\n<!-- end-beads-agent-instructions -->";
         assert!(contains_blurb(content));
         assert!(!contains_legacy_blurb(content));
     }
 
     #[test]
     fn test_contains_legacy_blurb() {
-        let content = "Some text\n<!-- bv-agent-instructions-v1 -->\nblurb\n<!-- end-bv-agent-instructions -->";
-        assert!(!contains_blurb(content));
-        assert!(contains_legacy_blurb(content));
-        assert!(contains_any_blurb(content));
+        // bv- format is legacy
+        let bv_content = "Some text\n<!-- bv-agent-instructions-v1 -->\nblurb\n<!-- end-bv-agent-instructions -->";
+        assert!(!contains_blurb(bv_content));
+        assert!(contains_legacy_blurb(bv_content));
+        assert!(contains_any_blurb(bv_content));
+
+        // br- format is also legacy
+        let br_content = "Some text\n<!-- br-agent-instructions-v1 -->\nblurb\n<!-- end-br-agent-instructions -->";
+        assert!(!contains_blurb(br_content));
+        assert!(contains_legacy_blurb(br_content));
+        assert!(contains_any_blurb(br_content));
     }
 
     #[test]
     fn test_get_blurb_version() {
-        assert_eq!(get_blurb_version("<!-- br-agent-instructions-v1 -->"), 1);
-        assert_eq!(get_blurb_version("<!-- br-agent-instructions-v2 -->"), 2);
+        assert_eq!(get_blurb_version("<!-- beads-agent-instructions-v1 -->"), 1);
+        assert_eq!(get_blurb_version("<!-- beads-agent-instructions-v2 -->"), 2);
         assert_eq!(get_blurb_version("no marker"), 0);
     }
 
@@ -1004,7 +985,7 @@ mod tests {
         let detection = detect_agent_file(temp_dir.path());
         assert!(detection.found());
         assert!(detection.has_blurb);
-        assert_eq!(detection.blurb_version, 1);
+        assert_eq!(detection.blurb_version, 2);
         assert!(!detection.needs_blurb());
         assert!(!detection.needs_upgrade());
     }
@@ -1033,7 +1014,7 @@ mod tests {
         let legacy_content = "# Agents\n\n<!-- bv-agent-instructions-v1 -->\nold\n<!-- end-bv-agent-instructions -->\n";
         let result = update_blurb(legacy_content);
         assert!(!result.contains("bv-agent-instructions"));
-        assert!(result.contains("br-agent-instructions-v1"));
+        assert!(result.contains("beads-agent-instructions-v2"));
     }
 
     #[test]
